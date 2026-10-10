@@ -11,8 +11,7 @@ All functions operate on simple strings; the database layer is handled by
 """
 
 from typing import Optional
-import datetime
-
+from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 # Static configuration – can be extended later
 # ---------------------------------------------------------------------------
@@ -88,6 +87,10 @@ def auto_escalate(database):
         if t["status"] in ("Resolved", "Escalated"):
             continue
         created = datetime.datetime.fromisoformat(t["created_at"])
+        created = _parse_created_at(complaint.get("created_at"))
+        if created is None:
+            continue
+        now = datetime.now(created.tzinfo) if created.tzinfo else datetime.now()
         age_minutes = (now - created).total_seconds() / 60
         if age_minutes >= 30:
             # Perform escalation if possible
@@ -108,5 +111,17 @@ def auto_escalate(database):
                     timestamp=timestamp,
                 )
     # No return value – changes are persisted in the DB.
+def _parse_created_at(value):
+    """Convert a stored timestamp into a datetime."""
+    if isinstance(value, datetime):
+        return value
+
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
 
 # End of routing.py
