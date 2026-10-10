@@ -418,85 +418,83 @@ else:
                     "content": user_message,
                 })
 
-                if st.session_state[confirm_key]:
-                    answer = user_message.strip().lower()
-                    yes_words = {
-                        "yes", "yes submit", "confirm", "submit",
-                        "go ahead", "please submit",
-                    }
-                    no_words = {
-                        "no", "cancel", "don't submit",
-                        "do not submit", "not yet",
-                    }
+            if user_message:
+                history.append({
+                    "role": "user",
+                    "content": user_message,
+                })
 
-                    if answer in yes_words:
-                        parsed = st.session_state[pending_key]
+                answer = user_message.strip().lower()
 
-                        if parsed:
-                            ticket_id = str(uuid.uuid4())[:8]
-                            now = datetime.datetime.now(
-                                datetime.timezone.utc
-                            ).isoformat()
+                yes_words = {
+                    "yes", "y", "yes submit", "confirm", "submit",
+                    "go ahead", "please submit", "yes please",
+                }
+                no_words = {
+                    "no", "n", "cancel", "don't submit",
+                    "do not submit", "not yet", "no thanks",
+                }
 
-                            add_complaint(
-                                ticket_id=ticket_id,
-                                description=parsed["summary"],
-                                category=parsed["category"],
-                                block=parsed["block"],
-                                priority=parsed["priority"],
-                                user_id=uid,
-                                status="Open",
-                                assigned_role=parsed["assigned_role"],
-                                created_at=now,
-                                updated_at=now,
-                            )
+                if st.session_state[confirm_key] and answer in yes_words:
+                    parsed = st.session_state[pending_key]
 
-                            log_action(
-                                ticket_id=ticket_id,
-                                action="Created",
-                                from_role=None,
-                                to_role=parsed["assigned_role"],
-                                timestamp=now,
-                            )
+                    if parsed:
+                        ticket_id = str(uuid.uuid4())[:8]
+                        now = datetime.datetime.now(
+                            datetime.timezone.utc
+                        ).isoformat()
 
-                            history.append({
-                                "role": "assistant",
-                                "content": (
-                                    f"Your complaint has been submitted! "
-                                    f"**Ticket ID:** #{ticket_id}\n\n"
-                                    f"- Category: {parsed['category']}\n"
-                                    f"- Block: {parsed['block']}\n"
-                                    f"- Priority: {parsed['priority']}\n"
-                                    f"- Assigned to: {parsed['assigned_role']}\n\n"
-                                    "You can track your ticket in the "
-                                    "Track Tickets tab."
-                                ),
-                            })
+                        add_complaint(
+                            ticket_id=ticket_id,
+                            description=parsed["summary"],
+                            category=parsed["category"],
+                            block=parsed["block"],
+                            priority=parsed["priority"],
+                            user_id=uid,
+                            status="Open",
+                            assigned_role=parsed["assigned_role"],
+                            created_at=now,
+                            updated_at=now,
+                        )
 
-                        st.session_state[pending_key] = None
-                        st.session_state[confirm_key] = False
+                        log_action(
+                            ticket_id=ticket_id,
+                            action="Created",
+                            from_role=None,
+                            to_role=parsed["assigned_role"],
+                            timestamp=now,
+                        )
 
-                    elif answer in no_words:
                         history.append({
                             "role": "assistant",
                             "content": (
-                                "No problem. I haven't submitted anything. "
-                                "Tell me what you'd like to change."
+                                f"Your complaint has been submitted! "
+                                f"**Ticket ID:** #{ticket_id}\n\n"
+                                f"- Category: {parsed['category']}\n"
+                                f"- Block: {parsed['block']}\n"
+                                f"- Priority: {parsed['priority']}\n"
+                                f"- Assigned to: {parsed['assigned_role']}\n\n"
+                                "You can track your ticket in the Track Tickets tab."
                             ),
                         })
-                        st.session_state[pending_key] = None
-                        st.session_state[confirm_key] = False
 
-                    else:
-                        history.append({
-                            "role": "assistant",
-                            "content": (
-                                "Please reply **yes** to submit this "
-                                "complaint, or **no** to cancel it."
-                            ),
-                        })
+                    st.session_state[pending_key] = None
+                    st.session_state[confirm_key] = False
+
+                elif st.session_state[confirm_key] and answer in no_words:
+                    history.append({
+                        "role": "assistant",
+                        "content": (
+                            "No problem. I haven't submitted anything. "
+                            "Tell me what you'd like to change or add."
+                        ),
+                    })
+                    st.session_state[pending_key] = None
+                    st.session_state[confirm_key] = False
 
                 else:
+                    # Continue the conversation, even when confirmation
+                    # was previously requested. The user may have more details.
                     with st.spinner("HostelCare AI is thinking..."):
                         result = chat_with_agent(
                             history[:-1],
@@ -518,12 +516,17 @@ else:
                             "Reply **yes** or **no**."
                         )
                     else:
+                        # The agent still needs information; do not submit.
+                        st.session_state[pending_key] = None
+                        st.session_state[confirm_key] = False
                         reply = result["reply"]
 
                     history.append({
                         "role": "assistant",
                         "content": reply,
                     })
+
+                st.rerun()
 
                 # Redraw chat after processing the new message
                 st.rerun()
