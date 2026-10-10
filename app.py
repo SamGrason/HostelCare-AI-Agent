@@ -273,6 +273,7 @@ with header_right:
 st.markdown("<div style='border-bottom: 1px solid #282a2c; margin-bottom: 24px; margin-top: 8px;'></div>", unsafe_allow_html=True)
 
 
+
 # ============================================================
 # LOGIN / SIGNUP SCREEN
 # ============================================================
@@ -286,7 +287,6 @@ if not st.session_state["logged_in"]:
     col_l, col_center, col_r = st.columns([1, 2, 1])
 
     with col_center:
-        # Registration mode is controlled by a text link.
         if "show_registration" not in st.session_state:
             st.session_state["show_registration"] = False
 
@@ -307,70 +307,97 @@ if not st.session_state["logged_in"]:
                     "your HostelCare dashboard."
                 )
 
-                # Text link above the sign-in form.
-                link_col, _ = st.columns([2, 3])
-                with link_col:
-                    if st.button(
-                        "Register student account ↗",
-                        key="open_registration",
-                        type="tertiary",
-                    ):
-                        st.session_state["show_registration"] = True
-                        st.rerun()
+                # Unique ID
+                uid_input = st.text_input(
+                    "Unique ID",
+                    placeholder="Enter your student or staff ID",
+                    key="login_uid",
+                )
 
-                with st.form("login_form"):
-                    uid_input = st.text_input(
-                        "Unique ID",
-                        placeholder="Enter your student or staff ID",
-                    )
+                # Password
+                pwd_input = st.text_input(
+                    "Password",
+                    type="password",
+                    placeholder="Enter your password",
+                    key="login_password",
+                )
 
-                    pwd_input = st.text_input(
-                        "Password",
-                        type="password",
-                        placeholder="Enter your password",
-                    )
+                # Clickable registration link directly below Password
+                st.markdown(
+                    """
+                    <style>
+                    div.st-key-open_registration button {
+                        background: transparent !important;
+                        border: none !important;
+                        color: #8ab4f8 !important;
+                        padding: 0 !important;
+                        margin-top: -4px !important;
+                        margin-bottom: 12px !important;
+                        font-size: 0.92rem !important;
+                        box-shadow: none !important;
+                        justify-content: flex-start !important;
+                    }
 
-                    submit_login = st.form_submit_button(
-                        "Sign In ✦",
-                        use_container_width=True,
-                    )
+                    div.st-key-open_registration button:hover {
+                        color: #aecbfa !important;
+                        text-decoration: underline !important;
+                        background: transparent !important;
+                    }
+                    </style>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-                    if submit_login:
-                        if not uid_input.strip() or not pwd_input:
-                            st.error(
-                                "Please provide both your Unique ID "
-                                "and password."
+                if st.button(
+                    "Register student account ↗",
+                    key="open_registration",
+                    type="tertiary",
+                ):
+                    st.session_state["show_registration"] = True
+                    st.rerun()
+
+                # Sign In button directly below the registration link
+                submit_login = st.button(
+                    "Sign In ✦",
+                    key="login_submit",
+                    use_container_width=True,
+                    type="primary",
+                )
+
+                if submit_login:
+                    if not uid_input.strip() or not pwd_input:
+                        st.error(
+                            "Please provide both your Unique ID "
+                            "and password."
+                        )
+                    else:
+                        # Identify the user's role from the registered account
+                        user = None
+
+                        for expected_role in (
+                            "Student",
+                            "Warden",
+                            "Staff",
+                        ):
+                            user = authenticate_user(
+                                uid_input.strip(),
+                                pwd_input,
+                                expected_role,
                             )
-                        else:
-                            # Authenticate against the account directory.
-                            # The returned database record determines the role.
-                            user = None
-
-                            for expected_role in (
-                                "Student",
-                                "Warden",
-                                "Staff",
-                            ):
-                                user = authenticate_user(
-                                    uid_input.strip(),
-                                    pwd_input,
-                                    expected_role,
-                                )
-                                if user:
-                                    break
-
                             if user:
-                                st.session_state["logged_in"] = True
-                                st.session_state["user_id"] = user["user_id"]
-                                st.session_state["user_name"] = user["name"]
-                                st.session_state["role"] = user["role"]
+                                break
 
-                                st.rerun()
-                            else:
-                                st.error(
-                                    "Invalid Unique ID or password. "
-                                    "Please check your credentials."
-                                )
+                        if user:
+                            st.session_state["logged_in"] = True
+                            st.session_state["user_id"] = user["user_id"]
+                            st.session_state["user_name"] = user["name"]
+                            st.session_state["role"] = user["role"]
+                            st.rerun()
+                        else:
+                            st.error(
+                                "Invalid Unique ID or password. "
+                                "Please check your credentials."
+                            )
 
             with st.expander("ℹ️ Default Demo Accounts"):
                 st.markdown(
@@ -477,6 +504,7 @@ if not st.session_state["logged_in"]:
 # ============================================================
 # MAIN APPLICATION INTERFACE (When user is logged in)
 # ============================================================
+
 else:
     current_role = st.session_state["role"]
     
