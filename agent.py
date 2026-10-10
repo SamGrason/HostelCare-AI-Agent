@@ -432,4 +432,160 @@ FULL CONVERSATION:
     }
 
 
+    # -----------------------------------------------------
+    # FALLBACK: TYPO-TOLERANT CONVERSATION + CLEAN SUMMARY
+    # -----------------------------------------------------
+
+    user_text = " ".join(
+        str(m.get("content", ""))
+        for m in messages
+        if m.get("role") == "user"
+    )
+
+    # Normalize common spelling mistakes before extracting details.
+    normalized = user_text.lower()
+
+    corrections = {
+        r"\bhelo+\b": "hello",
+        r"\bpls\b": "please",
+        r"\bpst\b": "past",
+        r"\bcurent\b": "current",
+        r"\bcurrnt\b": "current",
+        r"\beletricity\b": "electricity",
+        r"\belecricity\b": "electricity",
+        r"\beletrical\b": "electrical",
+        r"\bpowr\b": "power",
+        r"\bno curr(?:ent)?\b": "no power",
+        r"\broomn\b": "room",
+        r"\bblok\b": "block",
+        r"\bwaterr\b": "water",
+    }
+
+    for pattern, replacement in corrections.items():
+        normalized = re.sub(
+            pattern, replacement, normalized,
+            flags=re.IGNORECASE,
+        )
+
+    parsed = _fallback_parse(normalized)
+    category = parsed["category"]
+    block = parsed["block"]
+
+    # Extract room number.
+    room_match = re.search(
+        r"\broom\s*(?:no\.?\s*)?([a-z]?\d{1,4}[a-z]?)\b",
+        normalized,
+    )
+    room = room_match.group(1).upper() if room_match else ""
+
+    # Extract floor only when the student explicitly mentions it.
+    floor_match = re.search(
+        r"\b(ground|basement|first|second|third|fourth|fifth|"
+        r"sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)"
+        r"\s+floor\b",
+        normalized,
+    )
+    floor = floor_match.group(1).title() if floor_match else ""
+
+    # Accept common duration formats, including "for the past 2 hours".
+    duration_match = re.search(
+        r"\b(?:for\s+(?:the\s+)?(?:past\s+)?|"
+        r"past\s+|since\s+)"
+        r"(\d+\s*(?:minutes?|mins?|hours?|hrs?|days?|weeks?))\b",
+        normalized,
+    )
+    duration = duration_match.group(1) if duration_match else ""
+
+    # Check whether the conversation already supplied the details.
+    has_issue = category != "Other"
+    has_location = bool(room or floor)
+    has_duration = bool(duration)
+
+    if not has_issue:
+        reply = (
+            "No worries about the spelling! Could you tell me "
+            "what isn't working or what needs fixing?"
+        )
+        ready = False
+
+    elif block == "Unknown":
+        reply = (
+            "Got it. Which hostel block are you in, such as "
+            "A Block or B Block?"
+        )
+        ready = False
+
+    elif not has_location:
+        reply = (
+            "Which room or area is affected? You can give me "
+            "the room number and floor together."
+        )
+        ready = False
+
+    elif not has_duration:
+        reply = "Thanks. Roughly how long has this been happening?"
+        ready = False
+
+    else:
+        ready = True
+        reply = (
+            "I've organized the details into a clear complaint. "
+            "Please review it before I submit anything."
+        )
+
+    # Build a readable complaint rather than copying the chat transcript.
+    if category == "Electrical":
+        issue_description = "electrical power outage"
+        action = "inspect the electrical supply and restore power"
+    elif category == "Water":
+        issue_description = "water supply issue"
+        action = "inspect the water supply and restore service"
+    elif category == "Housekeeping":
+        issue_description = "housekeeping issue"
+        action = "inspect the area and arrange the necessary cleaning"
+    elif category == "Security":
+        issue_description = "security issue"
+        action = "investigate the reported security concern"
+    else:
+        issue_description = "hostel maintenance issue"
+        action = "inspect the reported issue"
+
+    location_parts = []
+    if block != "Unknown":
+        location_parts.append(f"{block} Block")
+    if floor:
+        location_parts.append(f"{floor} Floor")
+    if room:
+        location_parts.append(f"Room {room}")
+
+    location = ", ".join(location_parts) or "location to be confirmed"
+
+    duration_text = (
+        f" The issue has been ongoing for {duration}."
+        if duration else ""
+    )
+
+    summary = (
+        f"{issue_description.capitalize()} reported at {location}."
+        f"{duration_text} Please {action}."
+    )
+
+    # Keep routing consistent with your existing routing.py.
+    assigned_role = route_complaint(
+        category=category,
+        block=block,
+        priority=parsed["priority"],
+    )
+
+    return {
+        "reply": reply,
+        "ready_to_submit": ready,
+        "category": category,
+        "block": block,
+        "priority": parsed["priority"],
+        "summary": summary[:500],
+        "assigned_role": assigned_role,
+    }
+
+
 # End of agent.py
