@@ -522,12 +522,7 @@ else:
                         "role": "assistant",
                         "content": reply,
                     })
-
                 st.rerun()
-
-                # Redraw chat after processing the new message
-                st.rerun()
-
 
     # ============================================================
     # TAB: Ticket Tracker & Analytics
