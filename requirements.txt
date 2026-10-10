@@ -1,7 +1,7 @@
 streamlit==1.65.0  # httptools stub provided in project
 pandas==3.0.6
 numpy>=2.5.3
-pydantic==2.7.0
+pydantic>=2.12.0
 protobuf==5.26.1
 # pyarrow stub provided in project
 google-genai==0.2.0
