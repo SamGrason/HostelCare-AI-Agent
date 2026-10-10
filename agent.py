@@ -133,301 +133,286 @@ def process_complaint(text: str) -> Dict[str, str]:
 
 
 
-def chat_with_agent(history, user_message):
-    """Handle one turn of a conversational hostel support chat."""
 
+def chat_with_agent(history, user_message):
+    """Conversational hostel agent with reliable detail tracking."""
+
+    import json
+    import re
     from routing import route_complaint
 
-    # Combine previous student messages with the latest message.
+    # Collect the student's messages, not the assistant's replies.
     previous_user_messages = [
         str(item.get("content", ""))
         for item in history
         if item.get("role") == "user"
     ]
 
-    all_user_text = " ".join(
-        previous_user_messages + [user_message]
-    ).strip()
-
+    messages = previous_user_messages + [user_message]
+    combined = " ".join(messages)
+    combined = re.sub(r"\s+", " ", combined).strip()
     conversation = json.dumps(
-        history[-12:],
-        ensure_ascii=False
+        history[-12:], ensure_ascii=False
     )
 
     # ---------------------------------------------------------
-    # LOCATION CHECKS: enforced regardless of Gemini's answer.
+    # 1. Detect hostel block, including "A block" and "A blocl".
     # ---------------------------------------------------------
-
-    block_match = re.search(
-        r"\bblock\s*([a-z0-9]+)\b|"
-        r"\b([a-z0-9]+)\s*(?:block|blocl)\b",
-        all_user_text,
-        re.IGNORECASE,
-    )
 
     block = "Unknown"
-    if block_match:
-        block = (
-            block_match.group(1) or block_match.group(2)
-        ).upper()
 
-    floor_pattern = (
-        r"\b(?:ground|basement|first|second|third|fourth|"
-        r"fifth|sixth|seventh|eighth|ninth|tenth|"
-        r"\d{1,2}(?:st|nd|rd|th)?)\s+floor\b|"
-        r"\bfloor\s*(?:no\.?\s*)?\d{1,2}\b"
-    )
+    for message in messages:
+        match = re.search(
+            r"\bblock\s*([a-z0-9]+)\b|"
+            r"\b([a-z0-9]+)\s*(?:block|blocl)\b",
+            message,
+            re.IGNORECASE,
+        )
+        if match:
+            block = (match.group(1) or match.group(2)).upper()
 
-    floor_known = bool(
-        re.search(floor_pattern, all_user_text, re.IGNORECASE)
+    # ---------------------------------------------------------
+    # 2. Detect floor answers such as "8th", "8th floor",
+    #    "second floor", and "ground floor".
+    # ---------------------------------------------------------
+
+    floor_known = False
+    floor_label = ""
+
+    floor_words = (
+        r"ground|basement|first|second|third|fourth|fifth|"
+        r"sixth|seventh|eighth|ninth|tenth"
     )
+    ordinal = r"\d{1,2}(?:st|nd|rd|th)?"
+
+    for message in messages:
+        text = message.strip().lower()
+
+        match = re.search(
+            rf"\b({floor_words})\s+floor\b|"
+            rf"\b({ordinal})\s+floor\b|"
+            rf"\bfloor\s*({ordinal})\b",
+            text,
+        )
+
+        # A short reply like "8th" is accepted as a floor answer
+        # when the assistant previously asked which floor.
+        if not match and re.fullmatch(ordinal, text):
+            previous_assistant = [
+                str(item.get("content", ""))
+                for item in history
+                if item.get("role") == "assistant"
+            ]
+
+            if previous_assistant and re.search(
+                r"which floor|what floor|floor is",
+                previous_assistant[-1],
+                re.IGNORECASE,
+            ):
+                match = re.match(rf"({ordinal})", text)
+
+        if match:
+            floor_known = True
+            floor_label = next(
+                (group for group in match.groups() if group),
+                text,
+            )
+
+    # ---------------------------------------------------------
+    # 3. Detect room or whole-block locations.
+    # ---------------------------------------------------------
 
     room_known = bool(re.search(
         r"\b(?:room|rm\.?)\s*(?:no\.?\s*)?"
         r"[a-z]?\d{1,4}[a-z]?\b",
-        all_user_text,
+        combined,
         re.IGNORECASE,
     ))
 
-    entire_block_affected = bool(re.search(
+    whole_block = bool(re.search(
         r"\b(?:entire|whole)\s+(?:hostel\s+)?block\b|"
         r"\bthroughout\s+(?:the\s+)?block\b",
-        all_user_text,
+        combined,
         re.IGNORECASE,
     ))
 
-    location_detail_known = (
-        floor_known or room_known or entire_block_affected
-    )
+    location_detail_known = floor_known or room_known or whole_block
 
     # ---------------------------------------------------------
-    # GEMINI PROMPT
+    # 4. Identify complaint category from all student messages.
     # ---------------------------------------------------------
 
-    prompt = f"""
-You are HostelCare AI, a friendly hostel support assistant.
+    text = combined.lower()
 
-CONVERSATION STYLE:
-- Be empathetic, natural, concise, and helpful.
-- Ask only ONE relevant question at a time.
-- Remember information already given.
-- Never repeat a question already answered.
-- Acknowledge the problem before asking a follow-up.
-- Do not behave like a form or repeat the whole complaint.
+    if re.search(
+        r"\b(no water|water shortage|water supply|"
+        r"no drinking water|no water supply|water leak)\b",
+        text,
+    ):
+        category = "Water"
+    elif re.search(
+        r"\b(electricity|no power|power outage|"
+        r"power cut|electrical|sparks|exposed wire)\b",
+        text,
+    ):
+        category = "Electrical"
+    elif re.search(
+        r"\b(cleaning|dirty|garbage|rubbish|"
+        r"unclean|toilet cleaning|restroom cleaning)\b",
+        text,
+    ):
+        category = "Housekeeping"
+    elif re.search(
+        r"\b(security|theft|stolen|intruder|"
+        r"harassment|unsafe person)\b",
+        text,
+    ):
+        category = "Security"
+    else:
+        category = "Other"
 
-INFORMATION TO COLLECT:
-1. The problem and affected facility.
-2. Hostel block.
-3. Specific floor or room when relevant.
-4. Duration or extent of the problem when useful.
-5. Immediate safety risks.
+    # ---------------------------------------------------------
+    # 5. Detect duration and affected area.
+    # ---------------------------------------------------------
 
-CATEGORIES:
-Water, Electrical, Housekeeping, Security, Other.
+    duration_known = bool(re.search(
+        r"\b\d+\s*(?:minutes?|mins?|hours?|hrs?|days?)\b|"
+        r"\bsince (?:morning|afternoon|yesterday|last night)\b",
+        text,
+        re.IGNORECASE,
+    ))
 
-PRIORITIES:
-Low, Medium, High, Critical.
+    issue_known = category != "Other"
 
-PRIORITY GUIDANCE:
-- Low: minor inconvenience.
-- Medium: ordinary issue affecting a small area.
-- High: prolonged outage or serious problem affecting a floor
-  or multiple rooms.
-- Critical: immediate danger or a serious safety threat.
+    # High priority for prolonged water supply interruption.
+    priority = "Medium"
 
-SAFETY:
-For fire, sparks, exposed wires, or water near electrical
-equipment, tell the student to stay away and alert hostel staff.
-Never claim that staff have been contacted.
+    if category == "Water" and (
+        duration_known
+        or re.search(
+            r"\b(entire floor|whole floor|multiple floors|"
+            r"all restrooms|all toilets)\b",
+            text,
+        )
+    ):
+        priority = "High"
 
-SUBMISSION RULES:
-- Do not guess missing information.
-- Do not ask for a room number if an entire floor is affected.
-- Create a clean, standalone summary, not a concatenation of messages.
-- Set ready_to_submit=true only when the issue and location are clear.
-- The application will independently validate the location and
-  ask the student for confirmation before creating a ticket.
-- If the block is unknown, ask which block is affected.
-- If the floor/room is unknown and the issue affects a specific
-  facility, ask which floor or room is affected.
-- Ask for duration only when it would materially help assess the issue.
+    if re.search(
+        r"\b(fire|sparks|electrocution|exposed live wire)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        priority = "Critical"
 
-PREVIOUS CONVERSATION:
+    # ---------------------------------------------------------
+    # 6. Enforce information requirements.
+    # ---------------------------------------------------------
+
+    if not issue_known:
+        ready = False
+        reply = (
+            "I can help with that. Could you describe the "
+            "hostel problem you're experiencing?"
+        )
+
+    elif block == "Unknown":
+        ready = False
+        reply = "I'm sorry you're dealing with this. Which hostel block is affected?"
+
+    elif not location_detail_known:
+        ready = False
+        reply = (
+            "Got it. Which floor is the affected restroom on?"
+            if re.search(
+                r"\b(restroom|toilet|bathroom|washroom)\b",
+                text,
+            )
+            else "Which specific floor, room, or area is affected?"
+        )
+
+    else:
+        ready = True
+        reply = (
+            "Thanks, I understand. Would you like me to submit "
+            "this complaint?"
+        )
+
+    # ---------------------------------------------------------
+    # 7. Generate a clean summary from known facts.
+    # ---------------------------------------------------------
+
+    if category == "Water":
+        location_description = (
+            f"the {floor_label} floor restroom"
+            if floor_known
+            else "the affected restroom"
+            if not room_known
+            else "the affected room"
+        )
+
+        duration_match = re.search(
+            r"\b(?:for|since)\s+(\d+\s*(?:minutes?|mins?|hours?|hrs?|days?))",
+            text,
+            re.IGNORECASE,
+        )
+
+        duration = (
+            f" for {duration_match.group(1)}"
+            if duration_match
+            else ""
+        )
+
+        summary = (
+            f"No water supply in {location_description}, "
+            f"{block} Block{duration}."
+        )
+
+    else:
+        summary = combined[:500]
+
+    # ---------------------------------------------------------
+    # 8. Ask Gemini to improve the conversational reply only
+    #    when it is safe to do so. Required checks stay in control.
+    # ---------------------------------------------------------
+
+    if client and not ready:
+        try:
+            prompt = f"""
+You are a friendly hostel support assistant.
+Reply naturally in one or two short sentences.
+Ask ONLY for the missing information identified below.
+Do not repeat information the student has already supplied.
+Do not ask multiple questions.
+
+Conversation:
 {conversation}
 
-LATEST STUDENT MESSAGE:
+Student's latest message:
 {user_message}
 
-Return ONLY valid JSON with these keys:
-{{
-  "reply": "Natural response to the student",
-  "ready_to_submit": false,
-  "category": "Other",
-  "block": "Unknown",
-  "priority": "Medium",
-  "summary": "Short standalone complaint summary"
-}}
+Missing information:
+{
+    "hostel block" if block == "Unknown"
+    else "specific floor, room, or affected area"
+    if not location_detail_known
+    else "a clear description of the issue"
+}
+
+Return only the reply text. Do not return JSON.
 """
-
-    valid_categories = {
-        "Water", "Electrical", "Housekeeping", "Security", "Other"
-    }
-    valid_priorities = {"Low", "Medium", "High", "Critical"}
-
-    result = None
-
-    # ---------------------------------------------------------
-    # CALL GEMINI
-    # ---------------------------------------------------------
-
-    if client:
-        try:
             response = client.models.generate_content(
                 model="gemini-2.0-flash",
                 contents=prompt,
-                config={"response_mime_type": "application/json"},
             )
+            generated_reply = (response.text or "").strip()
 
-            raw = (response.text or "").strip()
-            raw = re.sub(
-                r"^```(?:json)?\s*|\s*```$",
-                "",
-                raw,
-                flags=re.IGNORECASE,
-            )
-
-            result = json.loads(raw)
+            if generated_reply:
+                reply = generated_reply
 
         except Exception as exc:
             print(
                 f"Gemini chat error: {type(exc).__name__}: {exc}"
             )
-
-    # ---------------------------------------------------------
-    # FALLBACK IF GEMINI FAILS
-    # ---------------------------------------------------------
-
-    if not isinstance(result, dict):
-        parsed = _fallback_parse(all_user_text)
-
-        result = {
-            "reply": "",
-            "ready_to_submit": False,
-            "category": parsed.get("category", "Other"),
-            "block": block,
-            "priority": parsed.get("priority", "Medium"),
-            "summary": "",
-        }
-
-    category = result.get("category", "Other")
-    priority = result.get("priority", "Medium")
-
-    if category not in valid_categories:
-        category = _fallback_parse(all_user_text).get(
-            "category", "Other"
-        )
-
-    if priority not in valid_priorities:
-        priority = "Medium"
-
-    # Trust the block found in the student's messages first.
-    if block == "Unknown":
-        model_block = str(result.get("block", "Unknown")).strip()
-
-        model_match = re.search(
-            r"\bblock\s*([a-z0-9]+)\b|"
-            r"\b([a-z0-9]+)\s*(?:block|blocl)\b",
-            model_block,
-            re.IGNORECASE,
-        )
-
-        if model_match:
-            block = (
-                model_match.group(1) or model_match.group(2)
-            ).upper()
-
-    # Recognize issue descriptions without depending entirely on Gemini.
-    issue_known = (
-        category != "Other"
-        or bool(re.search(
-            r"\b(water|leak|electricity|power|light|"
-            r"clean|dirty|garbage|security|broken|"
-            r"not working|overflow|clogged|blocked|"
-            r"restroom|bathroom|washroom|toilet)\b",
-            all_user_text,
-            re.IGNORECASE,
-        ))
-    )
-
-    # ---------------------------------------------------------
-    # MANDATORY SUBMISSION VALIDATION
-    # ---------------------------------------------------------
-
-    ready = (
-        issue_known
-        and block != "Unknown"
-        and location_detail_known
-        and bool(str(result.get("summary", "")).strip())
-        and result.get("ready_to_submit") is True
-    )
-
-    # Use an appropriate follow-up if required details are missing.
-    if not issue_known:
-        reply = (
-            "Of course, I'll help you with that. "
-            "Could you describe the problem you're experiencing?"
-        )
-
-    elif block == "Unknown":
-        reply = (
-            "I'm sorry you're dealing with this. "
-            "Which hostel block is affected?"
-        )
-
-    elif not location_detail_known:
-        if re.search(
-            r"\b(floor|restroom|bathroom|toilet|washroom)\b",
-            all_user_text,
-            re.IGNORECASE,
-        ):
-            reply = "Got it. Which floor is that restroom on?"
-        else:
-            reply = (
-                "Thanks for explaining. Which specific floor, "
-                "room, or area is affected?"
-            )
-
-    elif ready:
-        reply = (
-            "Thanks, I understand the issue and where it's happening. "
-            "Would you like me to submit this complaint?"
-        )
-
-    else:
-        # Do not offer submission until all checks pass.
-        reply = str(result.get("reply", "")).strip()
-
-        if not reply:
-            reply = (
-                "Thanks for explaining. Could you tell me a little "
-                "more about the issue?"
-            )
-
-    # ---------------------------------------------------------
-    # BUILD A CLEAN SUMMARY
-    # ---------------------------------------------------------
-
-    summary = str(result.get("summary", "")).strip()
-
-    if not summary:
-        summary = all_user_text[:500]
-
-    # Remove accidental duplicate whitespace.
-    summary = re.sub(r"\s+", " ", summary).strip()
-
-    # ---------------------------------------------------------
-    # ROUTE THE COMPLAINT
-    # ---------------------------------------------------------
 
     assigned_role = route_complaint(
         category=category,
