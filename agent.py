@@ -131,4 +131,143 @@ def process_complaint(text: str) -> Dict[str, str]:
     parsed["assigned_role"] = assigned_role
     return parsed
 
+def chat_with_agent(history, user_message):
+    """Handle one turn of a conversational hostel support chat."""
+
+    from routing import route_complaint
+
+    conversation = json.dumps(history[-12:], ensure_ascii=False)
+
+    prompt = f"""
+You are HostelCare AI, a helpful hostel support assistant.
+
+Talk naturally with the student. Ask one relevant follow-up question
+at a time. Remember details already given. Do not behave like a form.
+
+Gather:
+- What the problem is
+- Hostel block and room/location, when relevant
+- Any safety risk
+- Enough information to summarize the complaint
+
+Categories: Water, Electrical, Housekeeping, Security, Other.
+Priorities: Low, Medium, High, Critical.
+
+If the student reports sparks, fire, exposed wires, or water near
+electrical equipment, advise them to stay away and alert hostel staff
+immediately. Never claim that help has arrived or a ticket was created
+unless the application confirms it.
+
+Set ready_to_submit=true only when you understand the problem and
+have enough location information to prepare a ticket. The app will
+ask the student for confirmation before creating it.
+
+Previous conversation:
+{conversation}
+
+Latest student message:
+{user_message}
+
+Return ONLY valid JSON with these keys:
+{{
+  "reply": "Your next conversational response",
+  "ready_to_submit": false,
+  "category": "Other",
+  "block": "Unknown",
+  "priority": "Medium",
+  "summary": "Short description of the complaint"
+}}
+"""
+
+    if client:
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+            )
+
+            raw = (response.text or "").strip()
+            raw = re.sub(
+                r"^```(?:json)?\s*|\s*```$",
+                "",
+                raw,
+                flags=re.IGNORECASE,
+            )
+            result = json.loads(raw)
+
+            categories = {
+                "Water", "Electrical", "Housekeeping", "Security", "Other"
+            }
+            priorities = {"Low", "Medium", "High", "Critical"}
+
+            if result.get("category") not in categories:
+                result["category"] = "Other"
+
+            if result.get("priority") not in priorities:
+                result["priority"] = "Medium"
+
+            result["block"] = str(result.get("block", "Unknown"))[:40]
+            result["summary"] = str(
+                result.get("summary", user_message)
+            )[:500]
+            result["reply"] = str(
+                result.get("reply", "Could you tell me a little more?")
+            )
+            result["ready_to_submit"] = (
+                result.get("ready_to_submit") is True
+                and bool(result["summary"].strip())
+                and result["block"].lower() != "unknown"
+            )
+
+            result["assigned_role"] = route_complaint(
+                category=result["category"],
+                block=result["block"],
+                priority=result["priority"],
+            )
+            return result
+
+        except Exception:
+            # Continue with a basic fallback if the API call fails.
+            pass
+
+    # Basic fallback when Gemini is unavailable.
+    combined = " ".join(
+        str(item.get("content", ""))
+        for item in history
+        if item.get("role") == "user"
+    ) + " " + user_message
+
+    parsed = _fallback_parse(combined)
+
+    # Recognize both "Block B" and "B Block".
+    location_match = re.search(
+        r"\b(?:block\s*([a-z0-9]+)|([a-z0-9]+)\s*block)\b",
+        combined,
+        re.IGNORECASE,
+    )
+    if location_match:
+        parsed["block"] = (
+            location_match.group(1) or location_match.group(2)
+        ).upper()
+
+    location_known = parsed["block"] != "Unknown"
+    enough_detail = len(combined.split()) >= 5
+    ready = location_known and enough_detail
+
+    parsed["assigned_role"] = route_complaint(
+        category=parsed["category"],
+        block=parsed["block"],
+        priority=parsed["priority"],
+    )
+    parsed["ready_to_submit"] = ready
+    parsed["reply"] = (
+        f"Here's my understanding: {parsed['summary']}. "
+        "Would you like me to submit this complaint?"
+        if ready
+        else
+        "I'm here to help. Could you tell me which hostel block "
+        "you're in and describe where the problem is happening?"
+    )
+    return parsed
+
 # End of agent.py
