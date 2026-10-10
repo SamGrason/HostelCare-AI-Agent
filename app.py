@@ -395,17 +395,20 @@ else:
                 st.session_state[confirm_key] = False
                 st.rerun()
 
-            # Display previous messages
+            
+            # Display chat history like ChatGPT
             if not history:
-                with st.chat_message("assistant"):
-                    st.markdown(
-                        "Hi! I'm HostelCare AI. What's happening "
-                        "in your hostel today?"
-                    )
-
+                with st.chat_message("assistant", avatar="🤖"):
+                    st.markdown("Hi! I'm HostelCare AI. What's happening in your hostel today?")
+            
             for message in history:
-                with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
+                if message["role"] == "user":
+                    with st.chat_message("user", avatar="🧑‍🎓"):
+                        st.markdown(message["content"])
+                else:
+                    with st.chat_message("assistant", avatar="🤖"):
+                        st.markdown(message["content"])
+
 
             user_message = st.chat_input(
                 "Describe your hostel issue...",
