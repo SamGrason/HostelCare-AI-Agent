@@ -296,15 +296,10 @@ if not st.session_state["logged_in"]:
                     """
                     <h3 style="margin-top:0; font-weight:500;
                     font-size:1.25rem; color:#e3e3e3;">
-                    Sign in
+                    
                     </h3>
                     """,
                     unsafe_allow_html=True,
-                )
-
-                st.caption(
-                    "Sign in with your registered account to access "
-                    "your HostelCare dashboard."
                 )
 
                 # Unique ID
