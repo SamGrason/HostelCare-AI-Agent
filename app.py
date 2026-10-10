@@ -418,12 +418,6 @@ else:
                     "content": user_message,
                 })
 
-            if user_message:
-                history.append({
-                    "role": "user",
-                    "content": user_message,
-                })
-
                 answer = user_message.strip().lower()
 
                 yes_words = {
