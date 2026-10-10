@@ -31,6 +31,23 @@ CREATE TABLE IF NOT EXISTS complaints (
     updated_at TEXT NOT NULL
 );
 
+-- History of complaint updates and status changes
+CREATE TABLE IF NOT EXISTS complaint_updates (
+    update_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_id TEXT NOT NULL,
+    updated_by TEXT,
+    old_status TEXT,
+    new_status TEXT,
+    update_note TEXT,
+    timestamp TEXT NOT NULL,
+
+    FOREIGN KEY (ticket_id)
+        REFERENCES complaints(ticket_id),
+    FOREIGN KEY (updated_by)
+        REFERENCES users(user_id)
+);
+
+
 -- Action log for audit / escalation history
 CREATE TABLE IF NOT EXISTS action_logs (
     log_id INTEGER PRIMARY KEY AUTOINCREMENT,
