@@ -24,7 +24,7 @@ if not API_KEY:
 
 client = genai.Client(api_key=API_KEY) if API_KEY else None
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.8-flash"
 
 VALID_CATEGORIES = {
     "Water", "Electrical", "Housekeeping", "Security", "Other"
