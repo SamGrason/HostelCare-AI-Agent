@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-from agent import process_complaint
+from agent import process_complaint, chat_with_agent
 from database import (
     init_db,
     add_complaint,
@@ -359,66 +359,98 @@ else:
     else:
         tab_student, tab_tracker = st.tabs(["✨ Ask / Report Issue", "📋 Track Tickets"])
         tab_admin = None
-
+    
     # ============================================================
-    # TAB: Student Submit Complaint (Gemini Search / Prompt style)
+    # TAB: Conversational Student Support Agent
     # ============================================================
     if tab_student is not None:
         with tab_student:
-            st.markdown('<div class="gemini-hero-title">Where should we start?</div>', unsafe_allow_html=True)
-            
-            col_l, col_center, col_r = st.columns([1, 4, 1])
-            with col_center:
-                with st.form("complaint_form", clear_on_submit=True):
-                    complaint_text = st.text_area(
-                        "Ask Gemini",
-                        placeholder="Ask HostelCare AI or report any issue... (e.g., 'Water leaking in 2nd floor bathroom B-Block')",
-                        label_visibility="collapsed",
-                        height=90,
+            st.markdown(
+                '<div class="gemini-hero-title">How can I help you today?</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Describe your hostel issue naturally. I'll help you "
+                "understand it, prepare a complaint, and submit it "
+                "after your confirmation."
+            )
+
+            uid = st.session_state["user_id"]
+            chat_key = f"hostelcare_chat_{uid}"
+            pending_key = f"hostelcare_pending_{uid}"
+            confirm_key = f"hostelcare_confirm_{uid}"
+
+            if chat_key not in st.session_state:
+                st.session_state[chat_key] = []
+            if pending_key not in st.session_state:
+                st.session_state[pending_key] = None
+            if confirm_key not in st.session_state:
+                st.session_state[confirm_key] = False
+
+            history = st.session_state[chat_key]
+
+            if st.button("＋ New conversation"):
+                history.clear()
+                st.session_state[pending_key] = None
+                st.session_state[confirm_key] = False
+                st.rerun()
+
+            # Display previous messages
+            if not history:
+                with st.chat_message("assistant"):
+                    st.markdown(
+                        "Hi! I'm HostelCare AI. What's happening "
+                        "in your hostel today?"
                     )
-                    col_b1, col_b2, col_b3 = st.columns([1, 2, 1])
-                    with col_b2:
-                        submitted = st.form_submit_button("✦ Submit to HostelCare", use_container_width=True)
 
-                # Gemini-style suggestion chips
-                st.markdown(
-                    """
-                    <div style="margin-top: 18px;">
-                        <div class="prompt-chip">
-                            <span>💧</span> Report a plumbing or water cooler breakdown
-                        </div>
-                        <div class="prompt-chip">
-                            <span>⚡</span> Report power trip, sparks, or corridor lighting outage
-                        </div>
-                        <div class="prompt-chip">
-                            <span>🧹</span> Request urgent housekeeping or corridor sanitation
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+            for message in history:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
 
-                if submitted:
-                    if not complaint_text.strip():
-                        st.warning("Please describe your issue first.")
-                    else:
-                        with st.spinner("Analyzing complaint intent and routing authority..."):
-                            parsed = process_complaint(complaint_text)
+            user_message = st.chat_input(
+                "Describe your hostel issue...",
+                key=f"hostelcare_input_{uid}",
+            )
+
+            if user_message:
+                history.append({
+                    "role": "user",
+                    "content": user_message,
+                })
+
+                if st.session_state[confirm_key]:
+                    answer = user_message.strip().lower()
+                    yes_words = {
+                        "yes", "yes submit", "confirm", "submit",
+                        "go ahead", "please submit",
+                    }
+                    no_words = {
+                        "no", "cancel", "don't submit",
+                        "do not submit", "not yet",
+                    }
+
+                    if answer in yes_words:
+                        parsed = st.session_state[pending_key]
+
+                        if parsed:
                             ticket_id = str(uuid.uuid4())[:8]
-                            now = datetime.datetime.utcnow().isoformat()
-                            
+                            now = datetime.datetime.now(
+                                datetime.timezone.utc
+                            ).isoformat()
+
                             add_complaint(
                                 ticket_id=ticket_id,
-                                description=complaint_text,
+                                description=parsed["summary"],
                                 category=parsed["category"],
                                 block=parsed["block"],
                                 priority=parsed["priority"],
-                                                                 user_id=st.session_state["user_id"],
-                                 status="Open",
+                                user_id=uid,
+                                status="Open",
                                 assigned_role=parsed["assigned_role"],
                                 created_at=now,
                                 updated_at=now,
                             )
+
                             log_action(
                                 ticket_id=ticket_id,
                                 action="Created",
@@ -427,18 +459,75 @@ else:
                                 timestamp=now,
                             )
 
-                        st.success(f"Ticket **#{ticket_id}** created successfully!")
-                        
-                        # Gemini styled summary pill response
-                        res_col1, res_col2, res_col3, res_col4 = st.columns(4)
-                        with res_col1:
-                            st.metric("Category", parsed["category"])
-                        with res_col2:
-                            st.metric("Block", parsed["block"])
-                        with res_col3:
-                            st.metric("Priority", parsed["priority"])
-                        with res_col4:
-                            st.metric("Assigned To", parsed["assigned_role"])
+                            history.append({
+                                "role": "assistant",
+                                "content": (
+                                    f"Your complaint has been submitted! "
+                                    f"**Ticket ID:** #{ticket_id}\n\n"
+                                    f"- Category: {parsed['category']}\n"
+                                    f"- Block: {parsed['block']}\n"
+                                    f"- Priority: {parsed['priority']}\n"
+                                    f"- Assigned to: {parsed['assigned_role']}\n\n"
+                                    "You can track your ticket in the "
+                                    "Track Tickets tab."
+                                ),
+                            })
+
+                        st.session_state[pending_key] = None
+                        st.session_state[confirm_key] = False
+
+                    elif answer in no_words:
+                        history.append({
+                            "role": "assistant",
+                            "content": (
+                                "No problem. I haven't submitted anything. "
+                                "Tell me what you'd like to change."
+                            ),
+                        })
+                        st.session_state[pending_key] = None
+                        st.session_state[confirm_key] = False
+
+                    else:
+                        history.append({
+                            "role": "assistant",
+                            "content": (
+                                "Please reply **yes** to submit this "
+                                "complaint, or **no** to cancel it."
+                            ),
+                        })
+
+                else:
+                    with st.spinner("HostelCare AI is thinking..."):
+                        result = chat_with_agent(
+                            history[:-1],
+                            user_message,
+                        )
+
+                    if result["ready_to_submit"]:
+                        st.session_state[pending_key] = result
+                        st.session_state[confirm_key] = True
+
+                        reply = (
+                            f"{result['reply']}\n\n"
+                            f"**Complaint summary:** {result['summary']}\n\n"
+                            f"- Category: {result['category']}\n"
+                            f"- Block: {result['block']}\n"
+                            f"- Priority: {result['priority']}\n"
+                            f"- Assigned to: {result['assigned_role']}\n\n"
+                            "Would you like me to submit this complaint? "
+                            "Reply **yes** or **no**."
+                        )
+                    else:
+                        reply = result["reply"]
+
+                    history.append({
+                        "role": "assistant",
+                        "content": reply,
+                    })
+
+                # Redraw chat after processing the new message
+                st.rerun()
+
 
     # ============================================================
     # TAB: Ticket Tracker & Analytics
