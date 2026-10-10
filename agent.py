@@ -16,6 +16,8 @@ If the Gemini API fails (no key, network error, quota), the function falls
 back to a simple keyword‑based parser defined in ``_fallback_parse``.
 """
 
+# agent.py – Core Agentic logic for HostelCare AI
+
 import os
 import json
 import re
@@ -24,7 +26,12 @@ from typing import Dict
 from google import genai
 from dotenv import load_dotenv
 
-# Load environment variables (Gemini API key) from .env in the project root
+from routing import route_complaint
+
+# ---------------------------------------------------------
+# GEMINI CONFIGURATION
+# ---------------------------------------------------------
+
 load_dotenv()
 
 API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY")
@@ -34,114 +41,162 @@ if API_KEY:
 else:
     client = None
 
-# ---------------------------------------------------------------------------
-# Helper: deterministic fallback parser (keyword based)
-# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------
+# FALLBACK COMPLAINT PARSER
+# ---------------------------------------------------------
 
 def _fallback_parse(text: str) -> Dict[str, str]:
-    """Simple rule‑based extraction used when the LLM is unavailable.
-    It looks for keywords to guess ``category``, ``block`` and ``priority``.
-    """
+    """Extract basic complaint information without Gemini."""
+
     lowered = text.lower()
 
-    # Category mapping – extend as needed
     categories = {
         "water": "Water",
         "plumb": "Water",
         "leak": "Water",
         "electrical": "Electrical",
+        "electricity": "Electrical",
         "power": "Electrical",
         "electric": "Electrical",
         "light": "Electrical",
         "clean": "Housekeeping",
         "trash": "Housekeeping",
+        "garbage": "Housekeeping",
         "security": "Security",
         "theft": "Security",
     }
+
     category = "Other"
-    for kw, cat in categories.items():
-        if kw in lowered:
-            category = cat
+
+    for keyword, value in categories.items():
+        if keyword in lowered:
+            category = value
             break
 
-    # Block detection – pattern "block X" where X is a letter/number
-    block_match = re.search(r"block\s*([a-zA-Z0-9]+)", lowered)
-    block = block_match.group(1).upper() if block_match else "Unknown"
+    block_match = re.search(
+        r"\bblock\s*([a-zA-Z0-9]+)\b|"
+        r"\b([a-zA-Z0-9]+)\s*block\b",
+        text,
+        re.IGNORECASE,
+    )
 
-    # Priority heuristics – keywords indicating urgency
-    if any(word in lowered for word in ["urgent", "immediate", "asap", "critical", "danger", "spark", "fire"]):
+    block = (
+        block_match.group(1) or block_match.group(2)
+        if block_match
+        else "Unknown"
+    )
+
+    if any(word in lowered for word in [
+        "fire", "sparks", "electrocution",
+        "exposed live wire", "immediate danger",
+    ]):
         priority = "Critical"
-    elif any(word in lowered for word in ["no water", "no power", "leak", "broken"]):
+    elif any(word in lowered for word in [
+        "urgent", "no water", "no power",
+        "power outage", "leak", "broken",
+    ]):
         priority = "High"
     else:
         priority = "Medium"
 
     return {
         "category": category,
-        "block": block,
+        "block": block.upper(),
         "priority": priority,
         "summary": text.strip(),
     }
 
-# ---------------------------------------------------------------------------
-# LLM based parsing
-# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------
+# GEMINI COMPLAINT PARSER
+# ---------------------------------------------------------
 
 def _llm_parse(text: str) -> Dict[str, str]:
-    """Send the complaint to Gemini and ask for a JSON response.
-    The prompt enforces a strict schema so parsing is reliable.
-    """
-    prompt = (
-        "You are a helpful assistant that extracts structured information from a hostel complaint."
-        " Return a JSON object with exactly these keys:"
-        "\n  - category (Water, Electrical, Housekeeping, Security, Other)"
-        "\n  - block (e.g., 'A', 'B2')"
-        "\n  - priority (Low, Medium, High, Critical)"
-        "\n  - summary (short 1‑2 sentence version of the complaint)"
-        "\nOnly output the JSON and nothing else."
-        f"\n\nComplaint: {text}\n"
-    )
-    # Force deterministic fallback parsing – Gemini API call disabled
-    data = _fallback_parse(text)
-    return data
+    """Extract structured complaint details using Gemini."""
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+    if not client:
+        return _fallback_parse(text)
+
+    prompt = f"""
+Extract the details from this hostel complaint.
+
+Return JSON with:
+- category: Water, Electrical, Housekeeping, Security, Other
+- block: hostel block identifier, or Unknown
+- priority: Low, Medium, High, Critical
+- summary: short standalone complaint description
+
+Do not invent information.
+
+Complaint:
+{text}
+"""
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt,
+            config={"response_mime_type": "application/json"},
+        )
+
+        result = json.loads(response.text or "{}")
+
+        if result.get("category") not in {
+            "Water", "Electrical", "Housekeeping", "Security", "Other"
+        }:
+            result["category"] = "Other"
+
+        if result.get("priority") not in {
+            "Low", "Medium", "High", "Critical"
+        }:
+            result["priority"] = "Medium"
+
+        result.setdefault("block", "Unknown")
+        result.setdefault("summary", text.strip())
+
+        return result
+
+    except Exception as exc:
+        print(f"Gemini parsing error: {type(exc).__name__}: {exc}")
+        return _fallback_parse(text)
+
+
+# ---------------------------------------------------------
+# PUBLIC COMPLAINT PROCESSING FUNCTION
+# ---------------------------------------------------------
 
 def process_complaint(text: str) -> Dict[str, str]:
-    """Main entry point used by the Streamlit UI.
-    Returns a dict with ``category``, ``block``, ``priority`` and ``assigned_role``.
-    """
-    if not text:
+    """Parse a complaint and route it to the responsible authority."""
+
+    if not text or not text.strip():
         raise ValueError("Complaint text cannot be empty")
 
-    # 1️⃣ Parse – LLM if available, else fallback
-    parsed = _llm_parse(text) if client else _fallback_parse(text)
+    parsed = _llm_parse(text)
 
-    # 2️⃣ Routing – determine initial authority
-    from routing import route_complaint
-
-    assigned_role = route_complaint(
+    parsed["assigned_role"] = route_complaint(
         category=parsed["category"],
         block=parsed["block"],
         priority=parsed["priority"],
     )
 
-    parsed["assigned_role"] = assigned_role
     return parsed
 
 
-
+# ---------------------------------------------------------
+# CONVERSATIONAL HOSTELCARE AGENT
+# ---------------------------------------------------------
 
 def chat_with_agent(history, user_message):
-    """Conversational hostel agent with reliable detail tracking."""
+    """
+    Conduct a context-aware conversation.
 
-    import json
-    import re
-    from routing import route_complaint
+    Gemini decides which follow-up question is useful.
+    Application checks prevent submission without a known block
+    and a sufficiently specific location.
+    """
 
-    # Collect the student's messages, not the assistant's replies.
+    # Collect previous student messages.
     previous_user_messages = [
         str(item.get("content", ""))
         for item in history
@@ -149,15 +204,21 @@ def chat_with_agent(history, user_message):
     ]
 
     messages = previous_user_messages + [user_message]
-    combined = " ".join(messages)
-    combined = re.sub(r"\s+", " ", combined).strip()
+
+    combined = re.sub(
+        r"\s+",
+        " ",
+        " ".join(messages),
+    ).strip()
+
     conversation = json.dumps(
-        history[-12:], ensure_ascii=False
+        history[-16:],
+        ensure_ascii=False,
     )
 
-    # ---------------------------------------------------------
-    # 1. Detect hostel block, including "A block" and "A blocl".
-    # ---------------------------------------------------------
+    # -----------------------------------------------------
+    # DETECT HOSTEL BLOCK
+    # -----------------------------------------------------
 
     block = "Unknown"
 
@@ -168,13 +229,15 @@ def chat_with_agent(history, user_message):
             message,
             re.IGNORECASE,
         )
-        if match:
-            block = (match.group(1) or match.group(2)).upper()
 
-    # ---------------------------------------------------------
-    # 2. Detect floor answers such as "8th", "8th floor",
-    #    "second floor", and "ground floor".
-    # ---------------------------------------------------------
+        if match:
+            block = (
+                match.group(1) or match.group(2)
+            ).upper()
+
+    # -----------------------------------------------------
+    # DETECT FLOOR, INCLUDING A SHORT ANSWER LIKE "8"
+    # -----------------------------------------------------
 
     floor_known = False
     floor_label = ""
@@ -183,9 +246,10 @@ def chat_with_agent(history, user_message):
         r"ground|basement|first|second|third|fourth|fifth|"
         r"sixth|seventh|eighth|ninth|tenth"
     )
+
     ordinal = r"\d{1,2}(?:st|nd|rd|th)?"
 
-    for message in messages:
+    for index, message in enumerate(messages):
         text = message.strip().lower()
 
         match = re.search(
@@ -193,34 +257,47 @@ def chat_with_agent(history, user_message):
             rf"\b({ordinal})\s+floor\b|"
             rf"\bfloor\s*({ordinal})\b",
             text,
+            re.IGNORECASE,
         )
 
-        # A short reply like "8th" is accepted as a floor answer
-        # when the assistant previously asked which floor.
+        # Interpret "8" or "8th" as a floor when answering
+        # a question asking which floor.
         if not match and re.fullmatch(ordinal, text):
-            previous_assistant = [
+            assistant_messages = [
                 str(item.get("content", ""))
                 for item in history
                 if item.get("role") == "assistant"
             ]
 
-            if previous_assistant and re.search(
+            if assistant_messages and re.search(
                 r"which floor|what floor|floor is",
-                previous_assistant[-1],
+                assistant_messages[-1],
                 re.IGNORECASE,
             ):
                 match = re.match(rf"({ordinal})", text)
 
         if match:
             floor_known = True
+
             floor_label = next(
                 (group for group in match.groups() if group),
                 text,
             )
 
-    # ---------------------------------------------------------
-    # 3. Detect room or whole-block locations.
-    # ---------------------------------------------------------
+            # Normalize a numeric floor to a readable ordinal.
+            if floor_label.isdigit():
+                number = int(floor_label)
+                suffix = (
+                    "th" if 10 <= number % 100 <= 20
+                    else {1: "st", 2: "nd", 3: "rd"}.get(
+                        number % 10, "th"
+                    )
+                )
+                floor_label = f"{number}{suffix}"
+
+    # -----------------------------------------------------
+    # DETECT ROOM AND WHOLE-BLOCK LOCATIONS
+    # -----------------------------------------------------
 
     room_known = bool(re.search(
         r"\b(?:room|rm\.?)\s*(?:no\.?\s*)?"
@@ -236,44 +313,52 @@ def chat_with_agent(history, user_message):
         re.IGNORECASE,
     ))
 
-    location_detail_known = floor_known or room_known or whole_block
+    location_detail_known = (
+        floor_known or room_known or whole_block
+    )
 
-    # ---------------------------------------------------------
-    # 4. Identify complaint category from all student messages.
-    # ---------------------------------------------------------
+    # -----------------------------------------------------
+    # DETECT CATEGORY
+    # -----------------------------------------------------
 
     text = combined.lower()
 
     if re.search(
         r"\b(no water|water shortage|water supply|"
-        r"no drinking water|no water supply|water leak)\b",
+        r"water leak|plumbing|tap|toilet flush)\b",
         text,
     ):
         category = "Water"
+
     elif re.search(
-        r"\b(electricity|no power|power outage|"
-        r"power cut|electrical|sparks|exposed wire)\b",
+        r"\b(electricity|no power|power outage|power cut|"
+        r"electrical|sparks|exposed wire)\b",
         text,
     ):
         category = "Electrical"
+
     elif re.search(
-        r"\b(cleaning|dirty|garbage|rubbish|"
-        r"unclean|toilet cleaning|restroom cleaning)\b",
+        r"\b(cleaning|dirty|garbage|rubbish|unclean|"
+        r"restroom cleaning)\b",
         text,
     ):
         category = "Housekeeping"
+
     elif re.search(
         r"\b(security|theft|stolen|intruder|"
         r"harassment|unsafe person)\b",
         text,
     ):
         category = "Security"
+
     else:
         category = "Other"
 
-    # ---------------------------------------------------------
-    # 5. Detect duration and affected area.
-    # ---------------------------------------------------------
+    issue_known = category != "Other"
+
+    # -----------------------------------------------------
+    # DETECT DURATION AND IMPACT
+    # -----------------------------------------------------
 
     duration_known = bool(re.search(
         r"\b\d+\s*(?:minutes?|mins?|hours?|hrs?|days?)\b|"
@@ -282,20 +367,16 @@ def chat_with_agent(history, user_message):
         re.IGNORECASE,
     ))
 
-    issue_known = category != "Other"
+    impact_known = bool(re.search(
+        r"\b(entire floor|whole floor|multiple floors|"
+        r"all restrooms|all toilets|several rooms|"
+        r"one restroom|one toilet|only my room)\b",
+        text,
+        re.IGNORECASE,
+    ))
 
-    # High priority for prolonged water supply interruption.
+    # Determine urgency from available evidence.
     priority = "Medium"
-
-    if category == "Water" and (
-        duration_known
-        or re.search(
-            r"\b(entire floor|whole floor|multiple floors|"
-            r"all restrooms|all toilets)\b",
-            text,
-        )
-    ):
-        priority = "High"
 
     if re.search(
         r"\b(fire|sparks|electrocution|exposed live wire)\b",
@@ -304,45 +385,206 @@ def chat_with_agent(history, user_message):
     ):
         priority = "Critical"
 
-    # ---------------------------------------------------------
-    # 6. Enforce information requirements.
-    # ---------------------------------------------------------
-
-    if not issue_known:
-        ready = False
-        reply = (
-            "I can help with that. Could you describe the "
-            "hostel problem you're experiencing?"
+    elif category == "Electrical" and re.search(
+        r"\b(no power|no electricity|power outage|power cut)\b",
+        text,
+        re.IGNORECASE,
+    ) and (
+        duration_known
+        or re.search(
+            r"\b(entire floor|whole floor|multiple floors|"
+            r"whole block|entire block)\b",
+            text,
+            re.IGNORECASE,
         )
+    ):
+        priority = "High"
 
-    elif block == "Unknown":
-        ready = False
-        reply = "I'm sorry you're dealing with this. Which hostel block is affected?"
+    elif category == "Water" and duration_known:
+        priority = "High"
 
-    elif not location_detail_known:
-        ready = False
-        reply = (
-            "Got it. Which floor is the affected restroom on?"
-            if re.search(
-                r"\b(restroom|toilet|bathroom|washroom)\b",
-                text,
+    # -----------------------------------------------------
+    # GEMINI CONVERSATION
+    # -----------------------------------------------------
+
+    ready = False
+    reply = ""
+
+    if client:
+        try:
+            prompt = f"""
+You are HostelCare AI, an intelligent hostel support agent.
+
+Have a real conversation, not a rigid form interaction.
+
+Your goals:
+- Understand the student's actual problem.
+- Ask relevant follow-up questions.
+- Remember all previously supplied information.
+- Acknowledge answers naturally.
+- Never repeat questions that have already been answered.
+- Ask only ONE question per response.
+- Do not ask for a room number if a floor is affected.
+- Do not submit simply because a block and floor are known.
+- Consider duration, impact, severity, and safety when relevant.
+- Avoid asking unnecessary questions when the complaint is already clear.
+- If the student asks why you need more details, explain briefly.
+- If the student wants to add information, continue the conversation.
+- Never claim a ticket was created before the application confirms it.
+
+Examples of useful reasoning:
+- A water shortage: determine whether one or several restrooms
+  are affected and how long supply has been unavailable.
+- An electrical issue: establish scope and duration.
+- A cleaning issue: understand what needs cleaning and where.
+- A security issue: determine what happened and whether danger is ongoing.
+
+Do not rigidly follow these examples. Use judgment.
+
+Submission:
+- Ask follow-up questions until you understand the issue well enough
+  to create a useful complaint.
+- For ordinary facilities issues, consider the affected location,
+  duration, and impact. If a detail is not relevant or the student
+  cannot provide it, do not keep asking forever.
+- Once ready, prepare a short, accurate summary and ask for confirmation.
+- ready_to_submit must be true only when the complaint is sufficiently
+  understood and the block is known.
+- Categories: Water, Electrical, Housekeeping, Security, Other.
+- Priorities: Low, Medium, High, Critical.
+- Never invent details.
+
+Known extracted facts:
+Block: {block}
+Specific floor identified: {floor_known}
+Floor: {floor_label or "Unknown"}
+Room identified: {room_known}
+Duration provided: {duration_known}
+Affected scope described: {impact_known}
+Detected category: {category}
+
+Conversation:
+{conversation}
+
+Latest student message:
+{user_message}
+
+Return ONLY valid JSON:
+{{
+  "reply": "Natural response",
+  "ready_to_submit": false,
+  "category": "Other",
+  "block": "Unknown",
+  "priority": "Medium",
+  "summary": "Short standalone complaint summary"
+}}
+"""
+
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+                config={"response_mime_type": "application/json"},
             )
-            else "Which specific floor, room, or area is affected?"
+
+            raw = (response.text or "").strip()
+
+            raw = re.sub(
+                r"^```(?:json)?\s*|\s*```$",
+                "",
+                raw,
+                flags=re.IGNORECASE,
+            )
+
+            result = json.loads(raw)
+
+            valid_categories = {
+                "Water", "Electrical", "Housekeeping",
+                "Security", "Other",
+            }
+
+            valid_priorities = {
+                "Low", "Medium", "High", "Critical",
+            }
+
+            category = result.get("category", category)
+
+            if category not in valid_categories:
+                category = "Other"
+
+            priority = result.get("priority", priority)
+
+            if priority not in valid_priorities:
+                priority = "Medium"
+
+            summary = str(result.get("summary", "")).strip()
+            reply = str(result.get("reply", "")).strip()
+
+            # Use our independently detected block.
+            # Do not trust a model-invented block.
+            ready = (
+                result.get("ready_to_submit") is True
+                and block != "Unknown"
+                and location_detail_known
+                and bool(summary)
+                and bool(reply)
+            )
+
+        except Exception as exc:
+            print(
+                f"Gemini chat error: {type(exc).__name__}: {exc}"
+            )
+
+    # -----------------------------------------------------
+    # FALLBACK WHEN GEMINI IS UNAVAILABLE
+    # -----------------------------------------------------
+
+    if not client or not reply:
+        parsed = _fallback_parse(combined)
+        category = parsed.get("category", category)
+
+        if block == "Unknown":
+            reply = "Which hostel block is affected?"
+
+        elif not location_detail_known:
+            reply = (
+                "Which floor is affected?"
+                if re.search(
+                    r"\b(restroom|toilet|bathroom|washroom)\b",
+                    text,
+                )
+                else "Which specific floor, room, or area is affected?"
+            )
+
+        elif not duration_known:
+            reply = (
+                "How long has this been happening?"
+            )
+
+        elif not impact_known:
+            reply = (
+                "Is the issue affecting just this restroom, "
+                "or are other restrooms affected too?"
+            )
+
+        else:
+            reply = (
+                "I understand the issue. Would you like me to "
+                "submit this complaint?"
+            )
+
+        ready = (
+            block != "Unknown"
+            and location_detail_known
+            and duration_known
+            and impact_known
         )
 
-    else:
-        ready = True
-        reply = (
-            "Thanks, I understand. Would you like me to submit "
-            "this complaint?"
-        )
-
-    # ---------------------------------------------------------
-    # 7. Generate a clean summary from known facts.
-    # ---------------------------------------------------------
+    # -----------------------------------------------------
+    # BUILD A USEFUL COMPLAINT SUMMARY
+    # -----------------------------------------------------
 
     if category == "Water":
-        location_description = (
+        location = (
             f"the {floor_label} floor restroom"
             if floor_known
             else "the affected restroom"
@@ -351,7 +593,7 @@ def chat_with_agent(history, user_message):
         )
 
         duration_match = re.search(
-            r"\b(?:for|since)\s+(\d+\s*(?:minutes?|mins?|hours?|hrs?|days?))",
+            r"\b(?:for|past)\s+(\d+\s*(?:minutes?|mins?|hours?|hrs?|days?))",
             text,
             re.IGNORECASE,
         )
@@ -363,56 +605,24 @@ def chat_with_agent(history, user_message):
         )
 
         summary = (
-            f"No water supply in {location_description}, "
-            f"{block} Block{duration}."
+            f"No water supply in {location}, {block} Block{duration}."
         )
 
+        if impact_known and re.search(
+            r"\b(all restrooms|all toilets|multiple floors|"
+            r"entire floor|whole floor|several rooms)\b",
+            text,
+        ):
+            summary = (
+                f"Water supply interruption affecting multiple "
+                f"facilities in {block} Block{duration}."
+            )
+
     else:
-        summary = combined[:500]
-
-    # ---------------------------------------------------------
-    # 8. Ask Gemini to improve the conversational reply only
-    #    when it is safe to do so. Required checks stay in control.
-    # ---------------------------------------------------------
-
-    if client and not ready:
-        try:
-            prompt = f"""
-You are a friendly hostel support assistant.
-Reply naturally in one or two short sentences.
-Ask ONLY for the missing information identified below.
-Do not repeat information the student has already supplied.
-Do not ask multiple questions.
-
-Conversation:
-{conversation}
-
-Student's latest message:
-{user_message}
-
-Missing information:
-{
-    "hostel block" if block == "Unknown"
-    else "specific floor, room, or affected area"
-    if not location_detail_known
-    else "a clear description of the issue"
-}
-
-Return only the reply text. Do not return JSON.
-"""
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt,
-            )
-            generated_reply = (response.text or "").strip()
-
-            if generated_reply:
-                reply = generated_reply
-
-        except Exception as exc:
-            print(
-                f"Gemini chat error: {type(exc).__name__}: {exc}"
-            )
+        summary = (
+            str(locals().get("summary", "")).strip()
+            or combined[:500]
+        )
 
     assigned_role = route_complaint(
         category=category,
@@ -429,6 +639,7 @@ Return only the reply text. Do not return JSON.
         "summary": summary[:500],
         "assigned_role": assigned_role,
     }
+
 
 
 # End of agent.py
